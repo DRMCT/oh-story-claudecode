@@ -3,13 +3,25 @@ description: |
   连续章节块与已有成果归一专家。新内容模式一次读取一个不重叠的连续章节块，提取轻量章节事实和跨章剧情点；已有成果模式只读取旧拆文结果做二次提取，严禁回读原文或覆盖用户文件。
   被 story-long-analyze Stage 2 按运行计划调用；只读，不修改文件，不做跨书比较或创作评价。
 mode: subagent
-permission:
-  "*": deny
-  read: allow
-  glob: allow
-  grep: allow
-  edit: deny
-  bash: deny
+permissions:
+  - action: "*"
+    resource: "*"
+    effect: deny
+  - action: read
+    resource: "*"
+    effect: allow
+  - action: glob
+    resource: "*"
+    effect: allow
+  - action: grep
+    resource: "*"
+    effect: allow
+  - action: edit
+    resource: "*"
+    effect: deny
+  - action: shell
+    resource: "*"
+    effect: deny
 steps: 12
 ---
 
