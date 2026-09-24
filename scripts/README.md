@@ -7,13 +7,13 @@
 
 `python scripts/test-writer-pipeline.py` 验证长篇取段器与 prompt 组装器的公开 CLI：存量卷纲、作用域、退役历史、原生路径、必需资料与召回降档；在三平台 CI 运行。
 
-`python scripts/test-long-analyze-runtime.py` 验证长篇拆文的单状态运行时：机械章节索引与逐章 hash、旧成果识别、只读计划、范围批次、兼容摘要投影、相邻拆分、原子提交和缓存恢复。实际运行只使用 `skills/story-long-analyze/scripts/` 下三个脚本：`build_chapter_index.py`、`inspect_existing_assets.py`、`manage_analysis_run.py`。
+`python scripts/test-long-analyze-runtime.py` 验证长篇拆文的单状态运行时：机械章节索引与逐章 hash、旧成果识别、只读计划、范围批次、兼容摘要投影、相邻拆分、原子提交和缓存恢复。实际运行只使用 `skills/story-long-analyze/scripts/` 下三个脚本：`build_chapter_index.py`、`inspect_existing_assets.py`、`manage_analysis_run.py`。测试还覆盖旧版（带「章节边界」表）拆文库遇到楔子时的章号核对与并入出路、Windows/GBK 控制台下的 UTF-8 输出，以及 `render_relation_chart.py` 在没有中文字体时只写 Markdown 关系图、不出拼音图。
 
 ## 静态守卫（check-*）
 
 | 脚本 | 检查什么 | 何时跑 |
 |---|---|---|
-| `static-check.sh` + `static-check.py` | 结构化验证 frontmatter、Markdown 路径/锚点、Agent 引用、references 可达性；除基础组件 `browser-cdp` 外禁止跨 Skill 文件引用 | CI |
+| `static-check.sh` + `static-check.py` | 结构化验证 frontmatter、Markdown 路径/锚点、Agent 引用、references 可达性；除基础组件 `browser-cdp` 外禁止跨 Skill 文件引用；`author-report` 作者汇报模板不得含工程词 | CI |
 | `skill-numbering.py check` | 工作流 Step/Phase/Stage 编号策略、引用绑定、SKILL.md 裸编号/子步骤小数守卫 | CI；改工作流结构后 |
 | `check-current-skill-contracts.sh` + `.py` + `current-contract.json` | 从结构化 manifest 校验当前版本、Phase、schema、主产物与细纲契约；保留 legacy/path 守卫并拦截缺主产物后的静默替代 | CI |
 | `check-shared-files.sh` | 调两个显式 manifest 验 runtime/reference 副本，拦截未声明 exact/near-copy，并检查 setup profile 契约与消费可达性 | CI |
@@ -27,6 +27,7 @@
 | `check-hook-locale-safety.sh` | 部署 hook 在 Windows 中文 GBK 区域的字节安全 | CI |
 | `check-python-invocation.sh` | 技能文档禁止裸调 `python3`（须 python3→python→py 探测） | CI |
 | `check-agent-notes.py` + `test-agent-notes.py` | `.agents/notes/` 决策笔记的目录布局（状态/分类/日期文件名）、`Status` 与目录一致、必需小节（Problem / Decision 或 Proposal / Alternatives considered / Consequences）、禁止手工索引；test 用临时目录逐类违规回归 | CI；新增或移动笔记后 |
+| `check-author-reports.py` | `<!-- author-report -->` 标记的作者报告模板里不许出现工程黑话：内部字段/状态名、脚本名、flag、snake/kebab 标识符、S1–S4、Gate、裸编号；块尾一行「技术备注：」豁免；`--self-test` 自带正反例 | CI；改报告模板后 |
 | `check-plugin-packaging.py` | Claude/ZCode 两个 catalog 与两个原生 manifest 的单 bundle 身份、版本、默认组件发现和 13 个根 Skills | CI；改 plugin packaging 后 |
 | `check-claude-adapter.sh` | Claude marketplace、根 plugin manifest 与 13 个 skill 自动发现；可选真实 CLI 生命周期 | CI（静态）；`CLAUDE_REAL_CHECK=1`（真实 CLI） |
 | `check-opencode-adapter.sh` | OpenCode 2.x 适配层同步 + commands/agents 结构 + 生成权限的 2.x 裁决矩阵 + plugin 行为回归 | CI + sync CI（调 sync-opencode.py） |
@@ -58,7 +59,7 @@
 | `test-chapter-completion-lifecycle.py` | 公开 CLI 的 checkpoint、正常提交、欠长接受、超长单次压缩区间、blocking quality 阻断与下一章继续 | Linux / Windows / macOS CI |
 | `test-author-memory-commit.py` | 工作区作者记忆行为：单事件回执、≤2KB 相关查询、证据候选、冲突替代、撤回、失败零写入、旧修订、幂等重放与派生修复 | CI |
 | `test-codex-hooks.sh` | Codex hook 合成 stdin/stdout 契约 | CI |
-| `test-static-check.py` | 真 frontmatter block、精确路径/锚点、跨 Skill 引用、fence、死 reference、Agent 与章节链接 fixture | CI |
+| `test-static-check.py` | 真 frontmatter block、精确路径/锚点、跨 Skill 引用、fence、死 reference、Agent 与章节链接 fixture；作者汇报模板工程词守卫及长篇模板在位 | CI |
 | `test-current-skill-contracts.py` | current-contract manifest 类型/固定值与主产物 fail-fast 语义 fixture | CI |
 | `test-plugin-packaging.py` | 执行公开 packaging CLI，在临时仓库中变异 catalog/manifest/版本/组件过滤并断言结构化失败 | CI |
 | `test-claude-plugin-lifecycle.py` | 隔离 HOME 后用真实 Claude CLI 演练 13 个旧身份迁移为单 bundle、更新/卸载及无关插件保留 | `CLAUDE_REAL_CHECK=1`，由 `check-claude-adapter.sh` 调用 |
@@ -75,7 +76,7 @@
 | `test-antigravity-skills-deploy.py` | Antigravity 13 个已知 Skill 原子物化、未知 Skill 保留、symlink fail-closed/显式迁移与防穿透写回归 | 被 `check-antigravity-adapter.sh` 调用 |
 | `test-charcount-portable.sh` | 跨平台字符统计命令在三平台 + Windows 的正确性 | CI（调 check-python-invocation） |
 | `test-hook-encoding-portable.sh` | 部署 hook 在 Windows 中文系统的编码健壮性 | CI |
-| `test-long-analyze-runtime.py` | 长篇拆文索引、旧成果直接使用/增强/续跑路由、无重叠原文块、批次提交与恢复 | CI；改 story-long-analyze 运行时后 |
+| `test-long-analyze-runtime.py` | 长篇拆文索引、旧成果直接使用/增强/续跑路由、旧章号与楔子对齐、无重叠原文块、批次提交与恢复、关系图中文字体回退 | CI；改 story-long-analyze 运行时后 |
 | `test-inspiration-index.py` | 三层灵感库索引：EM 卡登记幂等、专名泄漏拦截、NM/CBA 闭包与计数、卡内路径引用拒绝、标签检索 | CI；改 inspiration_index.py 或灵感库契约后 |
 | `test-opencode-cli-e2e.sh` | 真实 OpenCode 2.x CLI e2e：repo skills 发现 / 13 commands / 7 agents / 插件 active，并用 mock 模型在后台服务上验证写正文拦截、写后兜底与 compaction 注入 | CLI compatibility CI；需已安装 OpenCode 2.x（`@opencode/cli`） |
 | `opencode-mock-llm.mjs` | OpenAI 兼容 mock 模型：按剧本文件发出工具调用并记录请求，供上面两个真实 OpenCode 测试驱动运行时 | 被 `test-opencode-cli-e2e.sh`、`test-agent-permissions.py --opencode` 调用 |

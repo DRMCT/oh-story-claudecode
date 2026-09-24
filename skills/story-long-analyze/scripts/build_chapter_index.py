@@ -15,9 +15,12 @@ import json
 import os
 import re
 import statistics
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+from inspect_existing_assets import legacy_mapping_check
 
 
 PARSER_VERSION = "3"
@@ -36,7 +39,6 @@ SPECIAL_RE = re.compile(
     rf"^\s*(?P<label>楔子|序章|引子|前言|后记|尾声|番外(?:[{NUMBER}]+)?)"
     r"(?:[\s:：\-—]+(?P<title>.*))?\s*$"
 )
-LEGACY_CHAPTER_FILE_RE = re.compile(r"^第0*(\d+)章_摘要\.md$")
 TITLE_PREFIX_RE = re.compile(r"^[\s\-—:：、.．]+")
 DIGITS = {"〇": 0, "零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
           "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
@@ -248,12 +250,33 @@ def normalized_chapter_text(lines: Sequence[str], start_line: int, end_line: int
     return "\n".join(selected)
 
 
-def build_boundaries(text: str, locator_path: str, source_hash: str) -> List[Dict[str, Any]]:
+def fold_leading_specials(candidates: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Merge 楔子/序章/第0章… before the first numbered chapter into that chapter.
+
+    Only on request: it reproduces the numbering of older runs that did not
+    count a prologue, so their 第N章 files keep pointing at the same chapter.
+    """
+    first = next((index for index, item in enumerate(candidates)
+                  if item.get("number_value") is not None and item["number_value"] >= 1), None)
+    if not first:
+        return candidates, []
+    folded = [str(item["source_chapter"]) if item["number_value"] is None else "第0章"
+              for item in candidates[:first]]
+    body = dict(candidates[first])
+    body["line"] = candidates[0]["line"]
+    return [body] + candidates[first + 1:], folded
+
+
+def build_boundaries(text: str, locator_path: str, source_hash: str,
+                     fold_prologue: bool = False) -> Tuple[List[Dict[str, Any]], List[str]]:
     lines = physical_lines(text)
     candidates = drop_adjacent_duplicate_headings(drop_leading_toc(heading_candidates(lines)), lines)
     if not candidates:
         raise ValueError("chapter_heading_not_found")
     validate_numbering(candidates)
+    folded = []  # type: List[str]
+    if fold_prologue:
+        candidates, folded = fold_leading_specials(candidates)
     rows = []  # type: List[Dict[str, Any]]
     for index, candidate in enumerate(candidates):
         start_line = candidate["line"]
@@ -272,7 +295,7 @@ def build_boundaries(text: str, locator_path: str, source_hash: str) -> List[Dic
             "chapter_sha256": sha256(normalized_chapter_text(lines, start_line, end_line).encode("utf-8")),
             "source_sha256": source_hash, "parser_version": PARSER_VERSION,
         })
-    return rows
+    return rows, folded
 
 
 def csv_payload(rows: Sequence[Dict[str, Any]]) -> bytes:
@@ -326,46 +349,42 @@ def mapping_signature(row: Dict[str, Any]) -> Tuple[str, str]:
     return str(row.get("volume", "")), str(row.get("source_chapter", ""))
 
 
+class RebuildMismatch(ValueError):
+    def __init__(self, code: str, author_message: str) -> None:
+        super().__init__(code)
+        self.author_message = author_message
+
+
+REBUILD_MISMATCH_MESSAGE = (
+    "重建章节表时发现，%s。照这样继续，已拆好的章节会和原文错开，所以章节表没有改。请选一种："
+    "① 换回上次拆文时用的那份原文再继续（推荐）；② 换一个新目录，整本重新拆。"
+)
+
+
+def index_was_folded(old_rows: Sequence[Dict[str, Any]], new_rows: Sequence[Dict[str, Any]]) -> bool:
+    """True when the existing index merged a prologue into chapter one.
+
+    A folded index starts with a numbered chapter although the text opens with
+    楔子/序章/第0章; a rebuild keeps that numbering instead of shifting it.
+    """
+    old_first = str(old_rows[0].get("source_chapter", "")) if old_rows else ""
+    new_first = str(new_rows[0].get("source_chapter", "")) if new_rows else ""
+    return (old_first.isdigit() and int(old_first) >= 1
+            and not (new_first.isdigit() and int(new_first) >= 1))
+
+
 def compare_rebuild(old_rows: Sequence[Dict[str, Any]], new_rows: Sequence[Dict[str, Any]]) -> List[int]:
-    if len(new_rows) < len(old_rows):
-        raise ValueError("chapter_mapping_ambiguous:index_would_shrink")
-    for position, old_row in enumerate(old_rows):
+    for position, old_row in enumerate(old_rows[:len(new_rows)]):
         if mapping_signature(old_row) != mapping_signature(new_rows[position]):
-            raise ValueError("chapter_mapping_ambiguous:position=%s" % (position + 1))
+            raise RebuildMismatch(
+                "chapter_mapping_ambiguous:position=%s" % (position + 1),
+                REBUILD_MISMATCH_MESSAGE % ("第%s章和上次的章节表对不上（上次是「%s」，这次是「%s」）" % (
+                    position + 1, old_row.get("title", ""), new_rows[position]["title"])))
+    if len(new_rows) < len(old_rows):
+        raise RebuildMismatch("chapter_mapping_ambiguous:index_would_shrink",
+                              REBUILD_MISMATCH_MESSAGE % "这次认出的章节比上次少")
     return [position for position, row in enumerate(new_rows, start=1)
             if position > len(old_rows) or old_rows[position - 1].get("chapter_sha256") != row["chapter_sha256"]]
-
-
-def legacy_mapping_conflict(output: Path, rows: Sequence[Dict[str, Any]]) -> Optional[str]:
-    """Reject a fresh ordinal index when existing summary identity is ambiguous.
-
-    A legacy project has no machine-readable mapping between ``第N章_摘要.md``
-    and source headings.  If the source starts with a prologue/zero/non-one
-    chapter, assigning internal ordinals would silently shift those files.
-    A normal source that starts at chapter one remains compatible, including
-    later volume-local renumbering.
-    """
-    summary_dir = output.parent / "章节"
-    if not summary_dir.is_dir() or not rows:
-        return None
-    summary_numbers = sorted(
-        int(match.group(1))
-        for path in summary_dir.iterdir()
-        if path.is_file() and (match := LEGACY_CHAPTER_FILE_RE.fullmatch(path.name))
-    )
-    if not summary_numbers:
-        return None
-    first_source = str(rows[0].get("source_chapter", "")).strip()
-    try:
-        starts_at_one = int(first_source) == 1
-    except ValueError:
-        starts_at_one = False
-    if starts_at_one:
-        return None
-    return (
-        "chapter_mapping_ambiguous:legacy_summaries_require_identity_mapping:"
-        "first_source=%s:summaries=%s" % (first_source or "unknown", ",".join(map(str, summary_numbers)))
-    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -374,10 +393,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--locator-path")
     parser.add_argument("--rebuild", action="store_true")
+    parser.add_argument("--fold-prologue", action="store_true",
+                        help="merge 楔子/序章/第0章 before the first numbered chapter into it")
     return parser.parse_args()
 
 
+def fail(error: str, author_message: Optional[str] = None) -> int:
+    payload = {"ok": False, "error": error}  # type: Dict[str, Any]
+    if author_message:
+        payload["author_message"] = author_message
+    print(json.dumps(payload, ensure_ascii=False))
+    return 2
+
+
 def main() -> int:
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     args = parse_args()
     try:
         if not args.source.is_file():
@@ -392,23 +424,27 @@ def main() -> int:
         if args.output.is_file() and not args.rebuild:
             reusable = reusable_index(args.output, source_hash, locator_path)
             if reusable is None:
-                print(json.dumps({"ok": False, "error": "existing_index_incompatible"}, ensure_ascii=False))
-                return 2
+                return fail("existing_index_incompatible",
+                            "原文和上次建章节表时不一样了（内容、文件名或识别规则变了）。确认原文就是要拆的版本后，再重建章节表。")
             _, existing_rows = reusable
             print(json.dumps({"ok": True, "reused": True, "parsed_source": False,
                               "chapters": len(existing_rows), "pending_chapters": []}, ensure_ascii=False))
             return 0
-        rows = build_boundaries(decode_source(raw), locator_path, source_hash)
+        text = decode_source(raw)
+        rows, folded = build_boundaries(text, locator_path, source_hash, args.fold_prologue)
         pending = list(range(1, len(rows) + 1))
         old_count = 0
         if args.output.is_file():
             _, old_rows = read_existing(args.output)
             old_count = len(old_rows)
+            if not args.fold_prologue and index_was_folded(old_rows, rows):
+                rows, folded = build_boundaries(text, locator_path, source_hash, True)
             pending = compare_rebuild(old_rows, rows)
         else:
-            mapping_error = legacy_mapping_conflict(args.output, rows)
-            if mapping_error:
-                raise ValueError(mapping_error)
+            mapping = legacy_mapping_check(args.output.parent, rows)
+            if mapping:
+                return fail("chapter_mapping_ambiguous:%s:legacy_chapters=%s" % (
+                    mapping["code"], ",".join(map(str, mapping["legacy_chapters"]))), str(mapping["author_message"]))
         data = csv_payload(rows)
         if not args.output.is_file() or args.output.read_bytes() != data:
             atomic_write(args.output, data)
@@ -417,11 +453,13 @@ def main() -> int:
             "chapters": len(rows), "empty_chapters": sum(row["status"] == "empty" for row in rows),
             "pending_chapters": pending, "unchanged_chapters": len(rows) - len(pending),
             "source_sha256": source_hash, "parser_version": PARSER_VERSION,
+            "folded_into_first_chapter": folded,
         }, ensure_ascii=False))
         return 0
+    except RebuildMismatch as exc:
+        return fail(str(exc), exc.author_message)
     except (OSError, UnicodeError, ValueError, csv.Error) as exc:
-        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
-        return 2
+        return fail(str(exc))
 
 
 if __name__ == "__main__":

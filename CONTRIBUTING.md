@@ -73,9 +73,10 @@ metadata: {"openclaw":{"source":"https://github.com/zenstory-ai/oh-story-claudec
 
 PR 自动运行 `.github/workflows/cross-platform.yml`。static-check job 跑以下检查（全部强制）：
 
-- `scripts/static-check.sh` — 结构化解析 frontmatter、精确 Markdown 路径/锚点、Agent 引用与 references 可达性；除基础组件 `browser-cdp` 外禁止跨 Skill 文件引用
+- `scripts/static-check.sh` — 结构化解析 frontmatter、精确 Markdown 路径/锚点、Agent 引用与 references 可达性；除基础组件 `browser-cdp` 外禁止跨 Skill 文件引用；`<!-- author-report -->` 标记的作者汇报模板不得含脚本/字段/参数名、状态码或内部清单名
 - `python3 scripts/skill-numbering.py check` — 工作流编号连续性、引用可绑定性及小数标签守卫
 - `python3 scripts/check-agent-notes.py` — `.agents/notes/` 决策笔记的目录布局、`Status` 与所在目录一致、必需小节；`python3 scripts/test-agent-notes.py` 为其行为回归
+- `python3 scripts/check-author-reports.py` — `<!-- author-report -->` 标记的作者报告模板不含脚本名、字段名、flag、严重度代号等工程黑话（`--self-test` 为其正反例回归）
 - `scripts/check-current-skill-contracts.sh` — 按 `scripts/current-contract.json` 校验当前版本 / Phase / schema / 主产物 / 细纲契约，并拦截历史路径与静默兼容分支
 - `python3 scripts/test-current-skill-contracts.py` — current-contract manifest 与主产物 fail-fast 语义回归
 - `scripts/check-doc-budget.sh` — 热路径 SKILL/references/agent 模板的字数预算（按 `scripts/doc-budget.json`），防每次会话都要付的规则文本无声膨胀
@@ -108,6 +109,8 @@ PR 自动运行 `.github/workflows/cross-platform.yml`。static-check job 跑以
 bash scripts/static-check.sh
 python3 scripts/test-static-check.py
 python3 scripts/check-agent-notes.py
+python3 scripts/check-author-reports.py --self-test
+python3 scripts/check-author-reports.py
 python3 scripts/skill-numbering.py check
 bash scripts/test-skill-numbering.sh
 bash scripts/check-current-skill-contracts.sh
@@ -199,6 +202,7 @@ python3 scripts/skill-numbering.py check
 - **简洁**：用表格和模板，不要长篇叙述
 - **自包含**：运行时 Skill 禁止跨 Skill 路径引用。确需共享的 reference 以 canonical source + manifest 管理的本地部署副本发布，保证每个 Skill 可独立安装
 - **中文**：所有内容用中文
+- **报告写给作者**：给作者看的报告/消息模板写在普通 ```` ```md ```` 围栏里，上一行加 `<!-- author-report -->` 标记（围栏信息串写成 `author-report` 时模型会把围栏原样回给作者，守卫拒收），只讲做了什么、发现了什么（附原文）、要作者决定什么、下一步；脚本名、字段名、flag、严重度代号和裸编号不进模板，确需保留的执行细节放块尾一行「技术备注：」。由 `check-author-reports.py` 守卫
 
 ## 提交流程
 
@@ -356,7 +360,7 @@ python3 scripts/test-antigravity-hook-merge.py
 node scripts/test-antigravity-hooks.mjs
 ```
 
-若本机装有当前 Antigravity 2.0 / `agy`，再在临时写作项目运行一次 `story-setup`，新开 conversation，用 `/skills`、`/agents`、`/hooks` 验发现，并分别验证 IDE 与交互式 CLI。`agy 1.1.22 -p` 的 headless 进程会在静默鉴权前先扫描 workspace，鉴权后不重载 custom agents/hooks；实测会出现 `subagent not found` 或把普通模型输出写进 `~/.gemini/antigravity-cli/scratch/`，因此当前不作为支持入口或 smoke 手段。测试后检查并清理意外 scratch 产物。自动化不读写用户 global customization，也不替代这个实机步骤。
+若本机装有当前 Antigravity 2.0 / `agy`，再在临时写作项目运行一次 `story-setup`，新开 conversation，用 `/skills`、`/agents`、`/hooks` 验发现，并分别验证 IDE 与交互式 CLI。print 模式 `agy -p` 必须带 `--add-dir "$PWD"`：实测 agy 1.2.10 带上它会加载工作区 `.agents/`（13 个 skills、7 个 agents 与 hooks），不带则都不加载，可能把普通模型输出写进 `~/.gemini/antigravity-cli/scratch/`。测试后检查并清理意外 scratch 产物。自动化不读写用户 global customization，也不替代这个实机步骤。
 
 ## ZCode 适配维护
 
@@ -413,7 +417,7 @@ bash scripts/test-codex-hooks.sh
 
 ### Codex 关键兼容性问题
 
-- **hooks 信任门槛**：Codex project `.codex/` 配置层需要被 trust，非 managed command hooks 还需要用户在 `/hooks` review/trust 后才会运行。
+- **hooks 信任门槛**：Codex project `.codex/` 配置层需要被 trust，非 managed command hooks 还需要用户在 `/hooks` review/trust 后才会运行。未信任前 Codex 静默跳过这些 hooks（包括写正文前的大纲守卫），不报错；自动化里的 `codex exec` 可加 `--dangerously-bypass-hook-trust`。
 - **hook JSON 契约**：`PreToolUse`、`PreCompact`、`PostCompact` 的普通 stdout 会被忽略；需要输出 JSON，如 `hookSpecificOutput.permissionDecision = "deny"` 或 `hookSpecificOutput.additionalContext`。
 - **PreToolUse 不完整拦截**：Codex 官方说明当前 shell/edit 拦截不是完备安全边界；story hooks 只作为写作流程 guardrail，不能替代版本控制和人工审查。
 - **agent 文件格式**：Codex custom agents 是 `.codex/agents/{name}.toml`，必需 `name`、`description`、`developer_instructions`；只读 agent 使用 `sandbox_mode = "read-only"`。

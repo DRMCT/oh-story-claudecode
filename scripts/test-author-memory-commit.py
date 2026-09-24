@@ -7,6 +7,7 @@ import importlib.util
 import itertools
 import json
 import random
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -267,6 +268,189 @@ def assert_omitted_ids_follow_priority() -> None:
     assert result["omitted_ids"] == sorted(omitted, key=order.__getitem__)[:module.OMITTED_IDS_MAX], \
         "omitted_ids 报的必须是优先级最高的那批——回吐的条目不得被封顶切掉"
     assert result["omitted"] == len(omitted), "omitted 保留真实总数"
+
+
+def assert_single_root_layout(temporary: Path, input_path: Path) -> None:
+    """单书布局（书根就是工作区）：两级 store 的默认落点重合，书级改住 书级/ 子目录。"""
+    # ---- 全新工作区：项目级、书级各写一条，query 两条都在 ----
+    fresh = temporary / "单书"
+    fresh.mkdir()
+    root_args = ("--book-root", str(fresh))
+    book_pref = preference("本书对话短句推进", "这本书对话都短一点。", scope_level="book", scope_value="单书")
+    first = json.loads(record(fresh, input_path, remember("sr-global", preference("全局：动词承重", "记住：动词承重。")), *root_args).stdout)
+    assert first["store"] == "project" and first["receipt"] == "Author Memory Receipt: r1 · AP001"
+    booked = json.loads(record(fresh, input_path, remember("sr-book", book_pref), *root_args).stdout)
+    assert booked["store"] == "book" and booked["book"] == "单书" and booked["receipt"] == "Author Memory Receipt: r1 · BP001"
+    book_dir = memory_dir(fresh) / "书级"
+    assert Path(booked["root"]) == book_dir.resolve(), "书级 store 必须落在子目录，不与项目级共用 state"
+    assert "book" not in state(fresh) and list(state(fresh)["items"]) == ["AP001"]
+    assert json.loads((book_dir / "_author-memory-state.json").read_text(encoding="utf-8"))["book"] == "单书"
+    # 书级写入之后，项目级写入与查询照常可用（修复前这里恒报 state.book）
+    second = json.loads(record(fresh, input_path, remember("sr-global-2", preference("全局：段尾不抒情", "记住：段尾不抒情。")), *root_args).stdout)
+    assert second["item_ids"] == ["AP002"] and second["warnings"] == []
+    assert [item["id"] for item in query(fresh, "--kind", "prose_style", *root_args)["items"]] == ["BP001", "AP002", "AP001"]
+    assert [item["id"] for item in query(fresh, "--kind", "prose_style")["items"]] == ["AP002", "AP001"], "不传书根拿不到书级条目"
+    forgot = json.loads(record(fresh, input_path, event("sr-forget", {"action": "forget", "item_id": "BP001", "quote": "x", "reason": "x"}), *root_args).stdout)
+    assert forgot["store"] == "book" and forgot["item_ids"] == ["BP001"]
+    run("check", "--workspace", str(fresh), *root_args)
+
+    # ---- v0.7.10 单根存量库：query / 书级 record / migrate 都可用，书名取存量条目 ----
+    legacy = temporary / "novel-root"  # 目录名不是书名
+    legacy.mkdir()
+    legacy_args = ("--book-root", str(legacy))
+    record(legacy, input_path, remember("v710-global", preference("全局：少用感叹号", "记住：少用感叹号。")))
+    seeded = state(legacy)
+    old_item = json.loads(json.dumps(seeded["items"]["AP001"], ensure_ascii=False))
+    old_item.update({"id": "AP002", "scope": {"level": "book", "value": "雾港来信"}, "assertion": "雾港来信：章末留钩子", "confirmation_count": 2})
+    seeded["items"]["AP002"] = old_item
+    seeded["next_item_number"] = 3
+    save_state(legacy, seeded)
+    run("init", "--workspace", str(legacy))
+    assert [item["id"] for item in query(legacy, "--kind", "prose_style", *legacy_args)["items"]] == ["AP001"], "存量 book 条目迁移前不参与查询"
+    fresh_book = json.loads(record(legacy, input_path, remember("v710-book", preference(
+        "雾港来信：对话短句", "这本书对话短一点。", scope_level="book", scope_value="雾港来信",
+    )), *legacy_args).stdout)
+    assert fresh_book["book"] == "雾港来信" and fresh_book["item_ids"] == ["BP001"], "单书布局下书名默认取唯一的存量书名，而不是目录名"
+    moved = json.loads(run("migrate", "--workspace", str(legacy), *legacy_args).stdout)
+    assert moved["migrated"] == [{"from": "AP002", "to": "BP002"}] and moved["book"] == "雾港来信"
+    after = state(legacy)
+    assert "book" not in after and after["items"]["AP002"]["status"] == "superseded"
+    moved_book = json.loads((memory_dir(legacy) / "书级" / "_author-memory-state.json").read_text(encoding="utf-8"))
+    assert moved_book["items"]["BP002"]["confirmation_count"] == 2
+    assert [item["id"] for item in query(legacy, "--kind", "prose_style", *legacy_args)["items"]] == ["BP002", "BP001", "AP001"]
+    assert json.loads(run("migrate", "--workspace", str(legacy), *legacy_args).stdout)["migrated"] == []
+    run("check", "--workspace", str(legacy), *legacy_args)
+
+    # ---- 已被旧版写坏的工作区：项目级位置上是一份书级 state，带书根运行即自愈 ----
+    donor = temporary / "供体工作区"
+    donor_root = donor / "长篇" / "雾港来信"
+    donor_root.mkdir(parents=True)
+    record(donor, input_path, remember("donor-book", preference(
+        "雾港来信：对话短句", "这本书对话短一点。", scope_level="book", scope_value="雾港来信",
+    )), "--book-root", str(donor_root))
+    broken = temporary / "坏库"
+    shutil.copytree(memory_dir(donor_root), memory_dir(broken))
+    broken_args = ("--book-root", str(broken))
+    assert "--book-root" in query(broken, "--kind", "prose_style", expect=2)["stderr"], "报错要指出怎么自愈"
+    before_failure = snapshot(memory_dir(broken))
+    record(broken, input_path, remember("broken-global", preference("全局：标题短", "记住：标题短。")), expect=2)
+    assert snapshot(memory_dir(broken)) == before_failure
+    healed = query(broken, "--kind", "prose_style", *broken_args)
+    assert [item["id"] for item in healed["items"]] == ["BP001"] and healed["book_revision"] == 1
+    assert "book" not in state(broken) and state(broken)["state_revision"] == 0, "项目级位置补一份空 state"
+    relocated = json.loads((memory_dir(broken) / "书级" / "_author-memory-state.json").read_text(encoding="utf-8"))
+    assert relocated["book"] == "雾港来信" and list(relocated["items"]) == ["BP001"], "归位不改 state 内容"
+    run("check", "--workspace", str(broken), *broken_args)
+    assert json.loads(record(broken, input_path, remember("healed-global", preference("全局：标题短", "记住：标题短。"))).stdout)["item_ids"] == ["AP001"]
+    booked_again = json.loads(record(broken, input_path, remember("healed-book", preference(
+        "雾港来信：少用比喻", "这本书少用比喻。", scope_level="book", scope_value="雾港来信",
+    )), *broken_args).stdout)
+    assert booked_again["item_ids"] == ["BP002"]
+    # 两处都是书级 state 时不猜，报错点名两份文件
+    shutil.copy(memory_dir(donor_root) / "_author-memory-state.json", memory_dir(broken) / "_author-memory-state.json")
+    assert "无法自动归位" in query(broken, "--kind", "prose_style", *broken_args, expect=2)["stderr"]
+
+
+def error_text(stderr: str) -> str:
+    """报错走 JSON（ensure_ascii），Windows 路径的反斜杠会被转义；按字段取出原文再比。"""
+    try:
+        return str(json.loads(stderr)["error"])
+    except (ValueError, KeyError, TypeError):
+        return stderr
+
+
+def assert_book_dir_is_not_single_root(temporary: Path, input_path: Path) -> None:
+    """多书工作区里的书目录被误传成 --workspace（书目录自己也含 .story/作者记忆/）：
+    不得当单书布局挪动书级 state，报错、零写入；正确调用照常可用。"""
+    workspace = temporary / "多书工作区"
+    book_root = workspace / "长篇" / "甲书"
+    book_root.mkdir(parents=True)
+    book_args = ("--book-root", str(book_root))
+    record(workspace, input_path, remember("mb-global", preference("全局：动词承重", "记住：动词承重。")))
+    record(workspace, input_path, remember("mb-book", preference(
+        "甲书：对话短句", "这本书对话短一点。", scope_level="book", scope_value="甲书",
+    )), *book_args)
+    before = snapshot(workspace)
+    mistaken = ("--workspace", str(book_root), *book_args)
+    for command in (("query", "--kind", "prose_style"), ("init",), ("check",), ("migrate",)):
+        failed = run(command[0], *mistaken, *command[1:], expect=2)
+        assert f"--workspace 应传 {workspace.resolve()}" in error_text(failed.stderr), failed.stderr
+    record(book_root, input_path, remember("mb-book-2", preference(
+        "甲书：少用比喻", "这本书少用比喻。", scope_level="book", scope_value="甲书",
+    )), *book_args, expect=2)
+    assert snapshot(workspace) == before, "误传书目录为工作区时不得改动任何文件"
+    assert not (memory_dir(book_root) / "书级").exists()
+    # 误传不带 --book-root 时，报错提示不得只引导「带 --book-root {工作区} 重跑」
+    hint = query(book_root, "--kind", "prose_style", expect=2)["stderr"]
+    assert "改传创作工作区根" in hint and "单书布局" in hint, hint
+    # 正确调用照常可用
+    assert [item["id"] for item in query(workspace, "--kind", "prose_style", *book_args)["items"]] == ["BP001", "AP001"]
+    run("check", "--workspace", str(workspace), *book_args)
+
+    # 其余两种迹象：祖先有 .active-book，或祖先有项目级 store（书目录不在 长篇/ 短篇/ 下）
+    marked = temporary / "标记工作区"
+    (marked / "书稿" / "乙书").mkdir(parents=True)
+    (marked / ".active-book").write_text("书稿/乙书\n", encoding="utf-8")
+    nested = marked / "书稿" / "乙书"
+    assert f"--workspace 应传 {marked.resolve()}" in error_text(run("init", "--workspace", str(nested), "--book-root", str(nested), expect=2).stderr)
+    stored = temporary / "有项目级工作区"
+    (stored / "丙书").mkdir(parents=True)
+    run("init", "--workspace", str(stored))
+    nested = stored / "丙书"
+    assert f"--workspace 应传 {stored.resolve()}" in error_text(run("init", "--workspace", str(nested), "--book-root", str(nested), expect=2).stderr)
+    assert not memory_dir(nested).exists()
+
+
+def assert_single_root_case_insensitive_path(temporary: Path, input_path: Path) -> None:
+    """大小写不敏感的文件系统（macOS APFS 默认）上，只差大小写的书根仍是同一目录。"""
+    probe = temporary / "CaseProbe"
+    probe.mkdir()
+    if not (temporary / "caseprobe").exists():
+        return  # 大小写敏感的文件系统上没有这种别名
+    workspace = temporary / "Book"
+    workspace.mkdir()
+    alias = ("--book-root", str(temporary / "book"))
+    record(workspace, input_path, remember("ci-global", preference("全局：动词承重", "记住：动词承重。")), *alias)
+    booked = json.loads(record(workspace, input_path, remember("ci-book", preference(
+        "本书对话短句", "这本书对话短一点。", scope_level="book", scope_value="Book",
+    )), *alias).stdout)
+    assert booked["item_ids"] == ["BP001"] and Path(booked["root"]).name == "书级", "只差大小写的书根也按单书布局住子目录"
+    assert "book" not in state(workspace), "项目级 state 不得被书级条目占用"
+    assert [item["id"] for item in query(workspace, "--kind", "prose_style", *alias)["items"]] == ["BP001", "AP001"]
+
+
+def assert_other_store_failure_is_nonfatal(temporary: Path, input_path: Path) -> None:
+    """写入已落盘后，读另一级 store 失败只降级为提醒：报错会让 agent 告诉作者「没记住」，
+    换个 event_id 重试就派生重复条目。"""
+    workspace = temporary / "读取失败工作区"
+    book_root = workspace / "长篇" / "甲"
+    book_root.mkdir(parents=True)
+    missing = ("--book-root", str(workspace / "长篇" / "不存在"))
+    global_event = remember("nf-global", preference("全局：动词承重", "记住：动词承重。"))
+    written = json.loads(record(workspace, input_path, global_event, *missing).stdout)
+    assert written["ok"] and written["receipt"] == "Author Memory Receipt: r1 · AP001"
+    assert any("读取失败" in warning and "book root does not exist" in warning for warning in written["warnings"])
+    assert state(workspace)["state_revision"] == 1
+    replayed = json.loads(record(workspace, input_path, global_event, *missing).stdout)
+    assert replayed["replayed"] is True and len(state(workspace)["items"]) == 1, "重试不得派生重复条目"
+    committed = json.loads(commit(workspace, input_path, transaction("nf-tx", 1, [
+        {"action": "remember", "preference": preference("全局：段尾不抒情", "记住：段尾不抒情。")},
+    ]), *missing).stdout)
+    assert committed["item_ids"] == ["AP002"] and any("读取失败" in warning for warning in committed["warnings"])
+
+    record(workspace, input_path, remember("nf-book", preference(
+        "甲书：对话短句", "这本书对话短一点。", scope_level="book", scope_value="甲",
+    )), "--book-root", str(book_root))
+    mismatched = json.loads(record(workspace, input_path, remember("nf-global-2", preference("全局：标题短", "记住：标题短。")),
+                                   "--book-root", str(book_root), "--book", "乙").stdout)
+    assert mismatched["item_ids"] == ["AP003"] and any("不一致" in warning for warning in mismatched["warnings"])
+
+    (memory_dir(workspace) / "_author-memory-state.json").write_text("{损坏", encoding="utf-8")
+    book_written = json.loads(record(workspace, input_path, remember("nf-book-2", preference(
+        "甲书：少用比喻", "这本书少用比喻。", scope_level="book", scope_value="甲",
+    )), "--book-root", str(book_root)).stdout)
+    assert book_written["item_ids"] == ["BP002"] and any("项目级 store 读取失败" in warning for warning in book_written["warnings"])
+    assert state(book_root)["state_revision"] == 2
 
 
 def main() -> None:
@@ -925,6 +1109,10 @@ def main() -> None:
         new_long = record(legacy_long_workspace, input_path, remember("legacy-new-long", preference(legacy_assertion + "再补一句。", "新的长断言。")), expect=2)
         assert "超出 120 字节上限" in new_long.stderr, "新建条目仍受一句话上限约束"
 
+        assert_single_root_layout(Path(temporary), input_path)
+        assert_book_dir_is_not_single_root(Path(temporary), input_path)
+        assert_single_root_case_insensitive_path(Path(temporary), input_path)
+        assert_other_store_failure_is_nonfatal(Path(temporary), input_path)
         assert_no_false_negatives()
         assert_omitted_ids_follow_priority()
         assert_slice_weight_counts_separators()
