@@ -7,7 +7,8 @@ description: |
   也可执行完整去AI味流程和格式合规检查。
 tools: [Read, Glob, Grep, Write, Edit, Bash]
 # Bash 用于书级自查脚本等确定性核对；字数与句长不自测、不上报，落盘后由父流程 chapter check 测定。
-model: sonnet
+model: opus
+# model: opus — 2026-09-25 靶子对照：同一份细纲与角色卡，sonnet 写出的情绪有结构没生气，opus 句子才活；写手是全套里唯一直接产出读者看到的文字的 agent，这一档成本值。
 maxTurns: 30
 # maxTurns: 30 — 覆盖正文写作场景（场景展开、情绪弧线执行、去AI味 7 Gate）。
 skills: [story-deslop]
